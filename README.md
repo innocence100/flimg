@@ -33,10 +33,10 @@ corrections — directly compressible by zpaq.
 ## Usage
 
 ```bash
-flimg -m encode -i photo.jpg -o photo.jpg.flimg
-flimg -m decode -i photo.jpg.flimg -o restored.jpg
-flimg -m encode -i icon.png  -o icon.png.flimg
-flimg -m decode -i icon.png.flimg  -o restored.png
+flimg -m encode -i photo.jpg -o photo.jpg.raw
+flimg -m decode -i photo.jpg.raw -o restored.jpg
+flimg -m encode -i icon.png  -o icon.png.raw
+flimg -m decode -i icon.png.raw  -o restored.png
 ```
 
 ## Building

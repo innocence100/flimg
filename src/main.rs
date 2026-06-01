@@ -59,8 +59,9 @@ const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 struct PngInfo {
     pre_idat: Vec<u8>,        // all bytes before first IDAT
     zlib_header: [u8; 2],
-    deflate_data: Vec<u8>,    // concatenated DEFLATE (without zlib header/adler32)
-    adler32: [u8; 4],         // original adler32 checksum of plaintext
+    deflate_data: Vec<u8>,    // concatenated raw DEFLATE (no zlib header/adler32)
+    adler32: [u8; 4],
+    idat_sizes: Vec<u32>,     // sizes of each original IDAT chunk's zlib data
 }
 
 fn parse_png(data: &[u8]) -> Result<PngInfo, String> {
@@ -69,9 +70,8 @@ fn parse_png(data: &[u8]) -> Result<PngInfo, String> {
     }
     let mut pos = 8;
     let mut pre_idat = Vec::new();
-    let mut zlib_header = [0u8; 2];
-    let mut deflate_data = Vec::new();
-    let mut adler32 = [0u8; 4];
+    let mut all_idat_data = Vec::new();
+    let mut idat_sizes = Vec::new();
     let mut found_idat = false;
 
     while pos + 12 <= data.len() {
@@ -84,34 +84,14 @@ fn parse_png(data: &[u8]) -> Result<PngInfo, String> {
 
         if chunk_type == b"IDAT" {
             let chunk_data = &data[pos+8..pos+8+chunk_len];
-            if !found_idat {
-                found_idat = true;
-                if chunk_data.len() < 6 {
-                    return Err("IDAT 数据过短".into());
-                }
-                zlib_header.copy_from_slice(&chunk_data[..2]);
-                deflate_data.extend_from_slice(&chunk_data[2..chunk_data.len()-4]);
-                adler32.copy_from_slice(&chunk_data[chunk_data.len()-4..]);
-            } else {
-                // Multi-IDAT: concatenate DEFLATE (skip zlib header for continuation chunks)
-                // Continuation chunks don't repeat the zlib header
-                deflate_data.extend_from_slice(&chunk_data[..chunk_data.len()-4]);
-                // Update adler32 to last chunk's value
-                adler32.copy_from_slice(&chunk_data[chunk_data.len()-4..]);
-            }
+            if !found_idat { found_idat = true; }
+            idat_sizes.push(chunk_len as u32);
+            all_idat_data.extend_from_slice(chunk_data);
             pos += 12 + chunk_len;
         } else if chunk_type == b"IEND" {
-            if !found_idat {
-                return Err("未找到 IDAT 块".into());
-            }
-            // Save IEND for reconstruction
+            if !found_idat { return Err("未找到 IDAT 块".into()); }
             break;
         } else {
-            if found_idat {
-                // Chunks after IDAT but before IEND (unusual but handle gracefully)
-                // Save them — they'll be restored after reconstruction
-            }
-            // Save pre-IDAT chunks
             let chunk_bytes = &data[pos..pos+12+chunk_len];
             if !found_idat {
                 pre_idat.extend_from_slice(chunk_bytes);
@@ -120,11 +100,16 @@ fn parse_png(data: &[u8]) -> Result<PngInfo, String> {
         }
     }
 
-    if !found_idat {
-        return Err("未找到 IDAT 块".into());
-    }
+    if !found_idat { return Err("未找到 IDAT 块".into()); }
+    if all_idat_data.len() < 6 { return Err("IDAT 数据过短".into()); }
 
-    Ok(PngInfo { pre_idat, zlib_header, deflate_data, adler32 })
+    // The zlib stream spans all IDAT chunks — strip header + adler32 from the combined data
+    let zlib_header = [all_idat_data[0], all_idat_data[1]];
+    let len = all_idat_data.len();
+    let deflate_data = all_idat_data[2..len - 4].to_vec();
+    let adler32 = [all_idat_data[len - 4], all_idat_data[len - 3], all_idat_data[len - 2], all_idat_data[len - 1]];
+
+    Ok(PngInfo { pre_idat, zlib_header, deflate_data, adler32, idat_sizes })
 }
 
 fn encode_png(data: &[u8], output: &mut impl Write) -> Result<(), String> {
@@ -144,11 +129,16 @@ fn encode_png(data: &[u8], output: &mut impl Write) -> Result<(), String> {
 
     output.write_all(&[0x02]).unwrap();
     output.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
-    // pre_idat size
+    // pre_idat size + data
     output.write_all(&(info.pre_idat.len() as u32).to_le_bytes()).unwrap();
     output.write_all(&info.pre_idat).unwrap();
     // zlib header
     output.write_all(&info.zlib_header).unwrap();
+    // idat_sizes count + sizes
+    output.write_all(&(info.idat_sizes.len() as u32).to_le_bytes()).unwrap();
+    for &s in &info.idat_sizes {
+        output.write_all(&s.to_le_bytes()).unwrap();
+    }
     // corrections
     output.write_all(&(corrections.len() as u32).to_le_bytes()).unwrap();
     output.write_all(corrections).unwrap();
@@ -177,6 +167,16 @@ fn decode_png(
     let zlib_header = [raw[pos], raw[pos+1]];
     pos += 2;
 
+    // idat_sizes
+    let idat_count = u32::from_le_bytes([raw[pos], raw[pos+1], raw[pos+2], raw[pos+3]]) as usize;
+    pos += 4;
+    let mut idat_sizes = Vec::with_capacity(idat_count);
+    for _ in 0..idat_count {
+        let s = u32::from_le_bytes([raw[pos], raw[pos+1], raw[pos+2], raw[pos+3]]);
+        idat_sizes.push(s);
+        pos += 4;
+    }
+
     // corrections
     let corr_len = u32::from_le_bytes([raw[pos], raw[pos+1], raw[pos+2], raw[pos+3]]) as usize;
     pos += 4;
@@ -199,16 +199,18 @@ fn decode_png(
     zlib_data.extend_from_slice(&deflate_data);
     zlib_data.extend_from_slice(&adler.to_be_bytes());
 
-    // Build IDAT chunk
-    let idat_chunk = build_png_chunk(b"IDAT", &zlib_data);
-    // Build IEND chunk
-    let iend_chunk = build_png_chunk(b"IEND", &[]);
-
     // Write PNG
     output.write_all(&PNG_SIG).unwrap();
     output.write_all(pre_idat).unwrap();
-    output.write_all(&idat_chunk).unwrap();
-    output.write_all(&iend_chunk).unwrap();
+    // Rebuild IDAT chunks with same boundaries as original
+    let mut offset = 0;
+    for &chunk_size in &idat_sizes {
+        let end = (offset + chunk_size as usize).min(zlib_data.len());
+        let seg = &zlib_data[offset..end];
+        output.write_all(&build_png_chunk(b"IDAT", seg)).unwrap();
+        offset = end;
+    }
+    output.write_all(&build_png_chunk(b"IEND", &[])).unwrap();
     Ok(())
 }
 
