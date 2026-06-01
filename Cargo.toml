@@ -1,0 +1,15 @@
+[package]
+name = "flimg"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+
+[[bin]]
+name = "flimg"
+path = "src/main.rs"
+
+[dependencies]
+preflate-rs = { git = "https://github.com/microsoft/preflate-rs", tag = "v0.7.6" }
+lepton_jpeg = "0.5.1"
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
