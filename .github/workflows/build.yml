@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            binary: flimg
+          - os: windows-latest
+            binary: flimg.exe
+          - os: macos-latest
+            binary: flimg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flimg-${{ matrix.os }}
+          path: target/release/${{ matrix.binary }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - run: |
+          mv flimg-ubuntu-latest/flimg   flimg-linux
+          mv flimg-macos-latest/flimg    flimg-macos
+          mv flimg-windows-latest/flimg.exe flimg-windows.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            flimg-linux
+            flimg-macos
+            flimg-windows.exe
+          fail_on_unmatched_files: true
