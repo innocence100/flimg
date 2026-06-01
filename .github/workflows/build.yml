@@ -37,6 +37,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - name: read version from Cargo.toml
         id: version
         run: |
