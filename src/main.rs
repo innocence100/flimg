@@ -265,8 +265,9 @@ fn main() {
         })
         .read_to_end(&mut input_data)
         .unwrap();
-    let mut output = std::fs::File::create(&cli.output).unwrap_or_else(|e| {
-        eprintln!("无法创建输出: {} ({})", cli.output.display(), e);
+    let tmp_path = cli.output.with_extension("flimg.tmp");
+    let mut output = std::fs::File::create(&tmp_path).unwrap_or_else(|e| {
+        eprintln!("无法创建输出: {} ({})", tmp_path.display(), e);
         std::process::exit(1);
     });
 
@@ -301,6 +302,16 @@ fn main() {
 
     if let Err(e) = result {
         eprintln!("错误: {}", e);
+        drop(output);
+        let _ = std::fs::remove_file(&tmp_path);
         std::process::exit(1);
     }
+    output.flush().unwrap();
+    let _ = output.sync_data();
+    drop(output);
+    std::fs::rename(&tmp_path, &cli.output).unwrap_or_else(|e| {
+        eprintln!("无法重命名 {} -> {} ({})", tmp_path.display(), cli.output.display(), e);
+        let _ = std::fs::remove_file(&tmp_path);
+        std::process::exit(1);
+    });
 }
